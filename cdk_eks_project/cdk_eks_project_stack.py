@@ -1,10 +1,13 @@
 from aws_cdk import (
     Stack,
-    CfnParameter,
+    Token,
+    Duration,
+    RemovalPolicy,
     aws_eks as eks,
     aws_ec2 as ec2,
     aws_ssm as ssm,
     aws_lambda as _lambda,
+    aws_logs as logs,
     custom_resources as cr,
     CustomResource,
 )
@@ -18,7 +21,7 @@ class CdkEksProjectStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # ------------------------------------------------------------------
-        # 0. Environment parameter
+        # 0. Environment
         #    Pass at deploy time:  cdk deploy -c env=staging
         #    Falls back to "development" if not provided.
         # ------------------------------------------------------------------
@@ -51,15 +54,26 @@ class CdkEksProjectStack(Stack):
         # ------------------------------------------------------------------
         # 3. Lambda function
         # ------------------------------------------------------------------
+
+        log_group = logs.LogGroup(
+            self,
+            "MyCustomLambdaLogGroup",
+            log_group_name="/aws/lambda/MyCustomLambda",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         lambda_fn = _lambda.Function(
             self,
             "MyCustomLambda",
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="index.handler",
             code=_lambda.Code.from_asset("lambda"),
+            timeout=Duration.seconds(30),
+            log_group=log_group, 
         )
 
-        # Least-privilege
+        # Least-privilege: Lambda may only read this specific parameter
         parameter.grant_read(lambda_fn)
 
         # ------------------------------------------------------------------
@@ -75,12 +89,15 @@ class CdkEksProjectStack(Stack):
             self,
             "MyCustomResource",
             service_token=provider.service_token,
+            properties={
+                "ForceUpdateTrigger": env_name,
+            },
         )
+
+        custom_resource.node.add_dependency(parameter)
 
         # get_att_string returns a CDK string token that resolves at deploy
         # time to the value stored in Data.replicaCount by the Lambda.
-        # We need a NUMBER for Helm, so we wrap it with Token.as_number().
-        from aws_cdk import Token
         replica_count = Token.as_number(
             custom_resource.get_att_string("replicaCount")
         )
@@ -89,15 +106,14 @@ class CdkEksProjectStack(Stack):
         # 5. Helm Chart
         #    - version is pinned so deploys are reproducible
         #    - dedicated namespace is best practice for ingress-nginx
-        #    - replica_count is properly cast to a number token
         # ------------------------------------------------------------------
         cluster.add_helm_chart(
             "IngressNginxChart",
             chart="ingress-nginx",
             repository="https://kubernetes.github.io/ingress-nginx",
             release="ingress-nginx",
-            version="4.10.1",               
-            namespace="ingress-nginx",      
+            version="4.10.1",  
+            namespace="ingress-nginx",
             create_namespace=True,
             values={
                 "controller": {

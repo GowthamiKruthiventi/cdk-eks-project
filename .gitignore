@@ -1,6 +1,8 @@
-cdk.out/
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-.vscode/
+cdk.out/
+.cdk.staging/
+*.egg-info/
+.env

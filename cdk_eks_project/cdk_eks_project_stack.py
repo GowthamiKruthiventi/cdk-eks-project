@@ -53,31 +53,42 @@ class CdkEksProjectStack(Stack):
 
         # ------------------------------------------------------------------
         # 3. Lambda function
+        #
+        #    Log group is created explicitly so retention is enforced from
+        #    day one. RemovalPolicy.DESTROY ensures logs are cleaned up
+        #    when the stack is destroyed.
         # ------------------------------------------------------------------
+        lambda_function_name = "HelmValuesResolver"
 
         log_group = logs.LogGroup(
             self,
-            "MyCustomLambdaLogGroup",
-            log_group_name="/aws/lambda/MyCustomLambda",
+            "HelmValuesResolverLogGroup",
+            log_group_name=f"/aws/lambda/{lambda_function_name}",
             retention=logs.RetentionDays.ONE_MONTH,
             removal_policy=RemovalPolicy.DESTROY,
         )
 
         lambda_fn = _lambda.Function(
             self,
-            "MyCustomLambda",
+            "HelmValuesResolver",
+            function_name=lambda_function_name,
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="index.handler",
             code=_lambda.Code.from_asset("lambda"),
             timeout=Duration.seconds(30),
-            log_group=log_group, 
+            log_group=log_group,
         )
 
-        # Least-privilege: Lambda may only read this specific parameter
+        # Least-privilege: Lambda only read this specific SSM parameter.
+
         parameter.grant_read(lambda_fn)
 
         # ------------------------------------------------------------------
         # 4. Custom Resource
+        #
+        #    cr.Provider manages the full CloudFormation lifecycle
+        #    (Create / Update / Delete) and handles the response protocol
+        #    automatically
         # ------------------------------------------------------------------
         provider = cr.Provider(
             self,
@@ -97,22 +108,21 @@ class CdkEksProjectStack(Stack):
         custom_resource.node.add_dependency(parameter)
 
         # get_att_string returns a CDK string token that resolves at deploy
-        # time to the value stored in Data.replicaCount by the Lambda.
         replica_count = Token.as_number(
             custom_resource.get_att_string("replicaCount")
         )
 
         # ------------------------------------------------------------------
         # 5. Helm Chart
-        #    - version is pinned so deploys are reproducible
-        #    - dedicated namespace is best practice for ingress-nginx
+        #    - chart version is pinned for reproducible deployments
+        #    - explicit dependency ensures Helm waits for Custom Resource
         # ------------------------------------------------------------------
-        cluster.add_helm_chart(
+        helm_chart = cluster.add_helm_chart(
             "IngressNginxChart",
             chart="ingress-nginx",
             repository="https://kubernetes.github.io/ingress-nginx",
             release="ingress-nginx",
-            version="4.10.1",  
+            version="4.10.1",
             namespace="ingress-nginx",
             create_namespace=True,
             values={
@@ -121,3 +131,5 @@ class CdkEksProjectStack(Stack):
                 }
             },
         )
+
+        helm_chart.node.add_dependency(custom_resource)
